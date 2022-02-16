@@ -9,19 +9,7 @@ namespace Carotaa.Utility
 {
 	public static class FileUtility
 	{
-		// Used to solve some Stupid Condition: Writing and reading the same file.
-		private static readonly Dictionary<string, WriteProcess> s_writeBuffer = new Dictionary<string, WriteProcess>();
-		
-		private static Dictionary<string, WriteProcess> Buffer
-		{
-			get
-			{
-				lock (s_writeBuffer)
-				{
-					return s_writeBuffer;
-				}
-			}
-		}
+		private static readonly Dictionary<string, Task> s_fileTasks = new Dictionary<string, Task>();
 
 		public static void ReadAllTextAsyncWithCallback(string filePath, Action<string> onComplete)
 		{
@@ -30,13 +18,6 @@ namespace Carotaa.Utility
 
 		public static void ReadALlTextAsyncWithCallback(string filePath, Encoding encoding, Action<string> onComplete)
 		{
-			if (Buffer.ContainsKey(filePath))
-			{
-				var buffer = Buffer[filePath].Text;
-				onComplete.Invoke(buffer);
-				return;
-			}
-			
 			var task = ReadAllTextAsync(filePath, encoding);
 
 			task.ContinueWith(prv =>
@@ -52,7 +33,8 @@ namespace Carotaa.Utility
 
 		public static Task<string> ReadAllTextAsync(string filePath, Encoding encoding)
 		{
-			var task = Task.Run(() =>
+			Task<string> task = null;
+			string FileProcess()
 			{
 				FileStream sourceStream = null;
 				string value = null;
@@ -75,29 +57,25 @@ namespace Carotaa.Utility
 				}
 				catch (Exception e)
 				{
-					LogError(e);
+					LogError(e, filePath);
 				}
 				finally
 				{
 					sourceStream?.Close();
 				}
 
-				return value;
-			});
+				// ReSharper disable once AccessToModifiedClosure
+				OnTaskComplete(filePath, task);
 
-			return task;
+				return value;
+			}
+			
+			return OnTaskCreate(filePath, out task, FileProcess);
 		}
 
 
 		public static void ReadAllBytesAsyncWithCallback(string filePath, Action<byte[]> onComplete)
 		{
-			if (Buffer.ContainsKey(filePath))
-			{
-				var buffer = Buffer[filePath].Bytes;
-				onComplete.Invoke(buffer);
-				return;
-			}
-			
 			var task = ReadAllBytesAsync(filePath);
 			task.ContinueWith(x =>
 			{
@@ -107,7 +85,8 @@ namespace Carotaa.Utility
 
 		public static Task<byte[]> ReadAllBytesAsync(string filePath)
 		{
-			var task = Task.Run(() =>
+			Task<byte[]> task = null;
+			byte[] FileProcess()
 			{
 				FileStream sourceStream = null;
 				byte[] value = null;
@@ -122,17 +101,20 @@ namespace Carotaa.Utility
 				}
 				catch (Exception e)
 				{
-					LogError(e);
+					LogError(e, filePath);
 				}
 				finally
 				{
 					sourceStream?.Close();
 				}
+				
+				// ReSharper disable once AccessToModifiedClosure
+				OnTaskComplete(filePath, task);
 
 				return value;
-			});
-
-			return task;
+			}
+			
+			return OnTaskCreate(filePath, out task, FileProcess);;
 		}
 
 		public static void WriteAllBytesAsyncWithCallback(string filePath, byte[] data, Action<WriteResult> onComplete)
@@ -147,6 +129,7 @@ namespace Carotaa.Utility
 
 		public static Task<WriteResult> WriteAllBytesAsync(string filePath, byte[] data)
 		{
+			Task<WriteResult> task = null;
 			WriteResult FileProcess()
 			{
 				FileStream sourceStream = null;
@@ -161,33 +144,20 @@ namespace Carotaa.Utility
 				catch (Exception e)
 				{
 					result.Error = e;
-					LogError(e);
+					LogError(e, filePath);
 				}
 				finally
 				{
 					sourceStream?.Close();
 				}
 
+				OnTaskComplete(filePath, task);
+
 				return result;
 			}
 
-			Task<WriteResult> task;
-			if (Buffer.TryGetValue(filePath, out var process))
-			{
-				process.Bytes = data;
-				task = process.Task.ContinueWith(x => FileProcess());
-			} 
-			else
-			{
-				task = Task.Run(FileProcess);
-				process = new WriteProcess() {
-					Bytes = data,
-					Task = task,
-				};
-				Buffer.Add(filePath, process);
-			}
 
-			return task;
+			return OnTaskCreate(filePath, out task, FileProcess);
 		}
 
 		public static void WriteAllTextAsyncWithCallback(string filePath, string data, Action<WriteResult> onComplete)
@@ -213,6 +183,7 @@ namespace Carotaa.Utility
 
 		public static Task<WriteResult> WriteAllTextAsync(string filePath, string data, Encoding encode)
 		{
+			Task<WriteResult> task = null;
 			WriteResult FileProcess()
 			{
 				FileStream sourceStream = null;
@@ -228,37 +199,25 @@ namespace Carotaa.Utility
 				catch (Exception e)
 				{
 					result.Error = e;
-					LogError(e);
+					LogError(e, filePath);
 				}
 				finally
 				{
 					sourceStream?.Close();
 				}
 
+				// ReSharper disable once AccessToModifiedClosure
+				OnTaskComplete(filePath, task);
+				
 				return result;
 			}
 
-			Task<WriteResult> task;
-			if (Buffer.TryGetValue(filePath, out var process))
-			{
-				task = process.Task.ContinueWith(x => FileProcess());
-			} 
-			else
-			{
-				task = Task.Run(FileProcess);
-				process = new WriteProcess() {
-					Text = data,
-					Task = task,
-				};
-				Buffer.Add(filePath, process);
-			}
-
-			return task;
+			return OnTaskCreate(filePath, out task, FileProcess);
 		}
 
-		private static void LogError(Exception e)
+		private static void LogError(Exception e, string filePath)
 		{
-			EventTrack.LogError(e);
+			Console.WriteLine(e);
 		}
 
 		public struct WriteResult
@@ -267,11 +226,35 @@ namespace Carotaa.Utility
 			public Exception Error;
 		}
 
-		private class WriteProcess
+		private static Task<T> OnTaskCreate<T>(string path, out Task<T> task, Func<T> fileProcess)
 		{
-			public string Text;
-			public byte[] Bytes;
-			public Task Task;
+			lock (s_fileTasks)
+			{
+				if (s_fileTasks.TryGetValue(path, out var prv))
+				{
+					task = prv.ContinueWith(x => fileProcess());
+				}
+				else
+				{
+					task = Task.Run(fileProcess);
+				}
+				
+				s_fileTasks[path] = task;
+			}
+
+			var outTask = task;
+			return outTask;
+		}
+		
+		private static void OnTaskComplete(string path, Task task)
+		{
+			lock (s_fileTasks)
+			{
+				if (s_fileTasks.ContainsKey(path) && s_fileTasks[path] == task)
+				{
+					s_fileTasks.Remove(path);
+				}
+			}
 		}
 	}
 }
